@@ -86,18 +86,35 @@ def test_arguments_only_use_declared_enum_values(examples):
 def test_negative_examples_are_present(examples):
     """Sem exemplos de 'não chame nada', o modelo tunado chama tool em tudo.
 
-    O doc do upstream cita cerca de 1 em 8 no gerador embutido; abaixo disso o
-    fine-tune destrói justamente as categorias que hoje o gate protege.
+    Medido: com 15,6% de negativos, uma epoch derrubou `negation` de 1/3 para
+    0/3 no espelho e subiu as falhas críticas de 5 para 7. O modelo aprendeu a
+    agir e desaprendeu a se conter. Some-se a isso que o fine-tune não atualiza
+    a cabeça de confiança -- o gate que convertia erro em recusa deixa de
+    existir nos pesos tunados -- e recusa passa a ser responsabilidade só dos
+    dados. Daí 28%, não os 12% de antes.
     """
     empty = [ex for ex in examples if not ex["answers"]]
-    assert len(empty) / len(examples) >= 0.12
+    assert len(empty) / len(examples) >= 0.28
 
 
 def test_negation_is_taught_not_just_refusal(examples):
     """Negação precisa aparecer como caso negativo explícito, não sobrar."""
     negated = [ex for ex in examples
                if not ex["answers"] and _normalise(ex["query"]).startswith("nao")]
-    assert len(negated) >= 20
+    assert len(negated) >= 60
+
+
+def test_negation_is_taught_beyond_the_leading_particle(examples):
+    """O pt-BR nega sem começar com 'não': no fim da frase, ou sem partícula.
+
+    Era a lacuna do conjunto anterior -- quase toda negação abria com não/nao,
+    enquanto a camada de estresse cobra 'deixa quieta', 'nem vem', 'esquece'.
+    """
+    marks = ("quiet", "nem ", "esquece", "melhor nao", "de jeito nenhum",
+             "pode deixar", "nao mexe", "nem pensa", "deixa quieto")
+    subtle = [ex for ex in examples
+              if not ex["answers"] and any(m in _normalise(ex["query"]) for m in marks)]
+    assert len(subtle) >= 40, f"só {len(subtle)} negações sem partícula inicial"
 
 
 def test_every_room_word_is_taught(examples):

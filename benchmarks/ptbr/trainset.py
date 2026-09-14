@@ -224,14 +224,26 @@ def _negative_cases():
     out = []
     for room, names in ROOMS.items():
         for word, prep in names:
+            # Metade abre com não/nao; a outra metade nega sem partícula
+            # inicial, que é como o pt-BR nega de verdade e era a lacuna que
+            # derrubou `negation` para 0/3 no experimento de uma epoch.
             for template in (f"não acende {LIGHT_NOUN[0]} {prep} {word}",
                              f"nao liga {LIGHT_NOUN[0]} {prep} {word}",
                              f"não liga {LIGHT_NOUN[0]} {prep} {word} não",
                              f"nao desliga {FAN_NOUN[0]} {prep} {word}",
                              f"não fecha {BLIND_NOUN[0]} {prep} {word}",
+                             f"não abre {BLIND_NOUN[0]} {prep} {word} não",
+                             f"nao mexe {prep} {word}",
+                             f"não precisa acender {LIGHT_NOUN[0]} {prep} {word}",
                              f"deixa {LIGHT_NOUN[0]} {prep} {word} quieta",
+                             f"deixa quieto {FAN_NOUN[0]} {prep} {word}",
                              f"nem vem abrir {BLIND_NOUN[0]} {prep} {word}",
+                             f"nem pensa em ligar {FAN_NOUN[0]} {prep} {word}",
                              f"esquece {BLIND_NOUN[0]} {prep} {word}",
+                             f"esquece {LIGHT_NOUN[0]} {prep} {word} por hoje",
+                             f"melhor nao mexer {prep} {word}",
+                             f"de jeito nenhum acende {LIGHT_NOUN[0]} {prep} {word}",
+                             f"pode deixar {LIGHT_NOUN[0]} {prep} {word} como está",
                              f"tira a mão {prep} {word}"):
                 out.append(_example(template, [],
                                     "pedido negado: nenhuma chamada deve ser emitida"))
@@ -252,8 +264,30 @@ def _negative_cases():
     for phrase in ("tranca a porta da frente", "toca uma música na sala",
                    "qual a temperatura lá fora", "o aspirador está carregando?",
                    "manda mensagem pro João", "liga a televisão da sala",
-                   "faz um café", "abre o portão da garagem"):
+                   "faz um café", "abre o portão da garagem",
+                   "que horas são", "acende a luz do banheiro",
+                   "liga o chuveiro", "abre a janela do quarto",
+                   "qual a previsão do tempo", "coloca um alarme pras 7",
+                   "liga o ar condicionado do quarto", "desliga a geladeira",
+                   "a luz da sala está acesa?", "quanto gastei de energia",
+                   "liga o som da sala", "aspira o teto",
+                   "fecha a porta da cozinha", "liga a luz do corredor"):
         out.append(_example(phrase, [], "nenhuma tool declarada cobre esse pedido"))
+    for phrase in ("deixa a luz mais ou menos", "põe o ventilador numa boa velocidade",
+                   "ajusta a persiana um pouco", "deixa a casa agradável",
+                   "coloca o termostato no normal", "deixa a luz do jeito que eu gosto",
+                   "aspira quando der", "deixa mais escuro ali",
+                   "deixa a temperatura boa pra dormir", "clareia um pouco aqui",
+                   "deixa o ventilador numa velocidade gostosa",
+                   "ajusta tudo pro modo noite", "deixa a luz fraquinha",
+                   "coloca uma temperatura de inverno",
+                   "deixa a persiana meio aberta", "põe a luz num tom agradável"):
+        out.append(_example(phrase, [], "pedido vago: nenhum valor concreto a preencher"))
+    for phrase in ("coloca o termostato em 100 graus", "coloca o termostato em 0 graus",
+                   "diminui a luz da cozinha para 300 por cento",
+                   "coloca o termostato em 9 graus", "coloca o termostato em 31 graus",
+                   "diminui a luz do escritório para -10 por cento"):
+        out.append(_example(phrase, [], "valor fora dos limites declarados: nenhuma chamada"))
     return out
 
 

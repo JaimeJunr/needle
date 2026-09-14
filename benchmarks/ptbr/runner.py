@@ -27,6 +27,21 @@ def _calls_match(got, want):
         sorted(json.dumps(c, sort_keys=True) for c in want)
 
 
+def apply_gate(got, confidence, min_confidence):
+    """Aplica o contrato de producao: abaixo do limiar, a chamada vira recusa.
+
+    `confidence` None significa cabeca de confianca nao calibrada -- o caso de
+    todo modelo tunado, porque o fine-tune nao a atualiza. Ai o gate e
+    INAPLICAVEL: nao se gateia nada, e quem le o resultado precisa saber que
+    aquele numero nao passou pela mesma rede de protecao dos demais.
+    """
+    if not got or not min_confidence or confidence is None:
+        return got, False
+    if confidence < min_confidence:
+        return [], True
+    return got, False
+
+
 def _agent(tools, system, weights=None):
     os.environ.setdefault("NEEDLE_STRICT_VALIDATE", "1")
     if weights:
@@ -43,10 +58,8 @@ def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weigh
         agent.reset()
         response = agent.complete(case["query"])
         got = response.get("function_calls") or []
-        confidence = response.get("confidence", 0.0)
-        gated = bool(got) and confidence < min_confidence
-        if gated:
-            got = []
+        confidence = response.get("confidence")
+        got, gated = apply_gate(got, confidence, min_confidence)
         records.append({
             "query": case["query"],
             "query_en": case.get("query_en"),
@@ -55,7 +68,7 @@ def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weigh
             "critical": bool(case.get("critical")),
             "want": case["calls"],
             "got": got,
-            "confidence": round(float(confidence), 4),
+            "confidence": None if confidence is None else round(float(confidence), 4),
             "gated": gated,
             "ok": _calls_match(got, case["calls"]),
         })
@@ -83,14 +96,15 @@ def summarise(result):
         if r["phenomenon"]:
             by_phenomenon[r["phenomenon"]][1] += 1
             by_phenomenon[r["phenomenon"]][0] += r["ok"]
-    confidences = [r["confidence"] for r in records if r["confidence"]]
+    confidences = [r["confidence"] for r in records if r["confidence"] is not None]
     return {
         "arm": result["arm"],
         "passed": passed,
         "total": len(records),
         "pct": round(100.0 * passed / len(records), 1) if records else 0.0,
         "critical_failures": len(critical_failures),
-        "mean_confidence": round(sum(confidences) / len(confidences), 4) if confidences else 0.0,
+        "mean_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+        "gate_applicable": bool(confidences),
         "seconds": result["seconds"],
         "by_category": {k: v for k, v in sorted(by_category.items())},
         "by_phenomenon": {k: v for k, v in sorted(by_phenomenon.items())},
@@ -101,8 +115,12 @@ def _print_summary(title, summaries):
     print(f"\n{title}")
     print(f"  {'braço':<8} {'acerto':>12} {'%':>7} {'críticos':>9} {'confiança':>10} {'tempo':>7}")
     for s in summaries:
+        confidence = "n/d" if s["mean_confidence"] is None else f"{s['mean_confidence']:.4f}"
         print(f"  {s['arm']:<8} {s['passed']:>5}/{s['total']:<6} {s['pct']:>6.1f}% "
-              f"{s['critical_failures']:>9} {s['mean_confidence']:>10.4f} {s['seconds']:>6.1f}s")
+              f"{s['critical_failures']:>9} {confidence:>10} {s['seconds']:>6.1f}s")
+    if any(not s["gate_applicable"] for s in summaries):
+        print("  ! confianca n/d: o fine-tune nao atualiza a cabeca de confianca, "
+              "entao o gate NAO se aplica a pesos tunados")
 
     categories = sorted({c for s in summaries for c in s["by_category"]})
     if categories:
