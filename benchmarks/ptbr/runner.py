@@ -27,14 +27,16 @@ def _calls_match(got, want):
         sorted(json.dumps(c, sort_keys=True) for c in want)
 
 
-def _agent(tools, system):
+def _agent(tools, system, weights=None):
     os.environ.setdefault("NEEDLE_STRICT_VALIDATE", "1")
+    if weights:
+        return needle.Needle(tools=tools, system=system, weights=weights)
     return needle.Needle(tools=tools, system=system)
 
 
-def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False):
+def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weights=None):
     """Roda um conjunto de casos contra uma configuração de tools e devolve o resultado bruto."""
-    agent = _agent(tools, system)
+    agent = _agent(tools, system, weights)
     records = []
     started = time.time()
     for case in cases:
@@ -145,6 +147,8 @@ def main(argv=None):
                         help="Roda também a camada de estresse (pontuada separadamente).")
     parser.add_argument("--json", type=str, default=None, help="Salva o resultado bruto.")
     parser.add_argument("--verbose", action="store_true", help="Imprime cada falha.")
+    parser.add_argument("--weights", type=str, default=None,
+                        help="Um .cact tunado a avaliar no lugar do modelo base.")
     args = parser.parse_args(argv)
 
     from benchmarks import ptbr
@@ -162,7 +166,7 @@ def main(argv=None):
             if args.verbose:
                 print(f"\n[{env_name}] braço {arm_name}")
             results.append(run_arm(arm_name, tools, system, cases,
-                                   args.min_confidence, args.verbose))
+                                   args.min_confidence, args.verbose, args.weights))
         summaries = [summarise(r) for r in results]
         payload["mirror"].append({"environment": env_name, "results": results})
         _print_summary(f"espelho · {env_name} (gate de confiança {args.min_confidence})", summaries)
@@ -175,7 +179,8 @@ def main(argv=None):
             ("pt/en", EN.TOOLS, EN.SYSTEM),
             ("pt/pt", smart_home.TOOLS_PT, smart_home.SYSTEM_PT),
         ]
-        results = [run_arm(n, t, s, ptbr.stress.TEST_CASES, args.min_confidence, args.verbose)
+        results = [run_arm(n, t, s, ptbr.stress.TEST_CASES, args.min_confidence,
+                           args.verbose, args.weights)
                    for n, t, s in stress_arms]
         payload["stress"] = results
         _print_summary(f"estresse pt-BR (gate de confiança {args.min_confidence})",

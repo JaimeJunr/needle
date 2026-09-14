@@ -23,7 +23,7 @@ import importlib
 
 _MIRROR_NAMES = ("smart_home",)
 
-__all__ = ["MIRRORS", "stress", *_MIRROR_NAMES]
+__all__ = ["MIRRORS", "stress", "trainset", *_MIRROR_NAMES]
 
 
 def _load(name):
@@ -31,7 +31,7 @@ def _load(name):
 
 
 def __getattr__(name):
-    if name in _MIRROR_NAMES or name == "stress":
+    if name in _MIRROR_NAMES or name in ("stress", "trainset"):
         return _load(name)
     if name == "MIRRORS":
         return {n: _load(n) for n in _MIRROR_NAMES}
@@ -39,4 +39,4 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted([*globals(), "MIRRORS", "stress", *_MIRROR_NAMES])
+    return sorted([*globals(), "MIRRORS", "stress", "trainset", *_MIRROR_NAMES])
