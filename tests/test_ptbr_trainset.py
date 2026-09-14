@@ -172,3 +172,49 @@ def test_tools_are_taught_in_reasonable_proportion(examples):
     total = sum(counts.values())
     for name, count in counts.items():
         assert count / total >= 0.05, f"{name} é só {100 * count / total:.1f}% das chamadas"
+
+
+# --- variante com negativos reduzidos (braço de controle do box) -----------
+
+def test_variant_hits_the_requested_negative_ratio():
+    """O braço de controle precisa da MESMA base, só com menos negativos.
+
+    Manter dois geradores divergentes deixaria a comparação sem sentido: a
+    diferença mediria drift entre arquivos, não a proporção de negativos.
+    """
+    light = trainset.build(negative_ratio=0.156)
+    empty = [ex for ex in light if not ex["answers"]]
+    assert 0.14 <= len(empty) / len(light) <= 0.17
+
+
+def test_variant_keeps_every_positive(examples):
+    """Só os negativos são subamostrados; mexer nos positivos mudaria duas coisas."""
+    light = trainset.build(negative_ratio=0.156)
+    full_positives = [ex["query"] for ex in examples if ex["answers"]]
+    light_positives = [ex["query"] for ex in light if ex["answers"]]
+    assert light_positives == full_positives
+
+
+def test_variant_is_deterministic():
+    assert [ex["query"] for ex in trainset.build(negative_ratio=0.156)] == \
+        [ex["query"] for ex in trainset.build(negative_ratio=0.156)]
+
+
+def test_variant_preserves_every_kind_of_refusal():
+    """Subamostrar não pode apagar uma categoria inteira de recusa.
+
+    Se a amostragem levasse todos os 'irrelevant' e deixasse só negação, o
+    braço de controle estaria testando outra coisa.
+    """
+    light = trainset.build(negative_ratio=0.156)
+    negatives = [_normalise(ex["query"]) for ex in light if not ex["answers"]]
+    assert any(n.startswith("nao") for n in negatives), "sem negação explícita"
+    assert any("nem " in n or "esquece" in n or "quiet" in n for n in negatives), \
+        "sem negação idiomática"
+    assert any("graus" in n for n in negatives), "sem valor inválido"
+
+
+def test_variant_does_not_contaminate(benchmark_queries):
+    light = trainset.build(negative_ratio=0.156)
+    train = {_normalise(ex["query"]) for ex in light}
+    assert not (train & {_normalise(q) for q in benchmark_queries})
