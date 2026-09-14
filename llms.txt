@@ -103,6 +103,7 @@ Every turn returns one dict:
 - `function_calls` is a list of `{"name", "arguments"}`. Read `arguments` directly; it is grammar-guaranteed to match your schema.
 - `reasoning` is a short unconstrained derivation of each argument from its source span.
 - `confidence` is a calibrated score in [0,1] (see Confidence gating).
+- `validation.ungrounded`, when present, lists `tool.field` names whose value is not grounded in the input, including date arguments whose year matches nothing in the conversation or the `system` facts. `run()` refuses those calls with `{"error": "ungrounded field"}` unless `strict=False`.
 
 ## Behaviour contract (important for correct code)
 

@@ -74,10 +74,11 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ -z "$last" ]; then
-            last="v$(curl -s https://pypi.org/pypi/cactus-needle/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')"
-          fi
-          echo "next=$(echo "${last#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')" >> "$GITHUB_OUTPUT"
+          # A manual bump on main or a publish whose tag step failed leaves
+          # PyPI ahead of the tags; the next version follows whichever is newer.
+          published=$(curl -sf https://pypi.org/pypi/cactus-needle/json | python3 -c 'import json,sys; print(json.loads(sys.stdin.read(), strict=False)["info"]["version"])' || true)
+          current=$(printf '%s\n%s\n' "${last#v}" "$published" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          echo "next=$(echo "$current" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')" >> "$GITHUB_OUTPUT"
       - if: steps.version.outputs.skip != 'true'
         run: |
           next="${{ steps.version.outputs.next }}"
@@ -98,6 +99,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add pyproject.toml needle/__init__.py
-          git commit -m "chore: release ${{ steps.version.outputs.next }}"
+          git diff --cached --quiet || git commit -m "chore: release ${{ steps.version.outputs.next }}"
           git tag "v${{ steps.version.outputs.next }}"
           git push origin "v${{ steps.version.outputs.next }}"

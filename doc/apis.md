@@ -5,7 +5,7 @@
 | `needle.Needle(tools=None, system=None, weights=None, tool_index_path=None, buffer_size=65536)` | Create an agent bound to one toolset. `tools` takes decorated functions, Pydantic models, raw JSON schema dicts, or a JSON string. `system` carries environment facts. `weights` loads a tuned `.cact`. `tool_index_path` persists tool embeddings for large catalogues. |
 | `agent.complete(text="", max_new_tokens=256, audio=None, audio_format="wav", sample_rate=0, channels=1)` | Complete a text, speech, or mixed turn. `audio` accepts WAV bytes or a path; PCM16 and float32 buffers use the accompanying format, rate, and channel fields. |
 | `agent.embed(text="", audio=None, audio_format="wav", sample_rate=0, channels=1)` | Embed text, serialized tool schemas, audio, or a mixed input with the Needle 3 retrieval head. |
-| `agent.run(query="", max_steps=8, max_new_tokens=256, audio=None, audio_format="wav", sample_rate=0, channels=1)` | Full agentic loop: the model picks calls, Needle executes your Python functions and feeds results back, and the final response carries the executed tool results as `results`. |
+| `agent.run(query="", max_steps=8, max_new_tokens=256, audio=None, audio_format="wav", sample_rate=0, channels=1, strict=True)` | Full agentic loop: the model picks calls, Needle executes your Python functions and feeds results back, and the final response carries the executed tool results as `results`. |
 | `agent.reset()` | Rewind the conversation, keep the tools loaded. |
 | `needle.tool` | Decorator that turns a function into a tool schema (attached as `fn._needle_tool`). |
 | `needle.Field(...)` | Per argument constraints, attached inline with `typing.Annotated` or passed as a default. |
@@ -119,6 +119,7 @@ Needle solves every problem as a function call. The context declares what may be
 
 - A request no declared tool can serve is refused with the empty call `[]`. That is the whole contract for off-topic input; there is no free-text fallback.
 - Arguments contain only values evidenced by the input. An optional field with no evidence is omitted, not guessed; omission is the field-level `[]`.
+- A date argument whose year matches none of the years written in the conversation so far or in the `system` facts is reported in `validation.ungrounded` as `tool.field`, alongside anything the engine itself flags as ungrounded. `run()` does not execute such a call; its result is `{"error": "ungrounded field"}` and the model continues from it. Pass `strict=False` to execute anyway.
 - `reasoning` is the model's short derivation of each argument from its source span (`'ten minutes' -> minutes 10`). It is generated unconstrained; only the call itself is grammar-constrained, so the JSON cannot be malformed while the derivation stays legible.
 - After you execute a call, pass the result back as the next `complete()`. The model continues from it, and later arguments may depend on earlier results: `search_for_contact` first, then `send_instant_message` with the returned `contact_id`. A final `"type": "respond"` with empty `function_calls` signals the loop is done; the answer is the tool results themselves, which `run()` collects on the final response as `results`. No free text is generated.
 - An agent shares one toolset. Later turns are bare queries against the same tools; `reset()` rewinds the conversation and keeps the tools loaded.
@@ -180,3 +181,17 @@ Each generation's engine is fetched once and cached under `~/.cache/cactus-needl
 3. Set `NEEDLE2_LIB_PATH=/path/to/libneedle.so` or `NEEDLE3_LIB_PATH=/path/to/libneedle.so` to override one generation. The legacy `NEEDLE_LIB_PATH` remains a Needle 2 alias; it is deliberately ignored for Needle 3 so a v3 archive cannot be sent to a v2 engine.
 
 The Python package itself installs offline the standard way: `pip download cactus-needle` on a connected machine, then `pip install --no-index --find-links <dir> cactus-needle` on the device. On a device that must never attempt the network, also set `HF_HUB_OFFLINE=1` so a missing engine fails fast with a clear error instead of trying to download.
+
+## WebAssembly component
+
+`needle download wasm-component --generation 2 --out .` pulls `needle.component.wasm` and its `needle.wit` world from the Hub. The same files are published to GHCR as a signed OCI artifact, one image per engine generation, tagged with the engine version:
+
+```sh
+oras pull ghcr.io/cactus-compute/needle2-component:2.0.4
+
+cosign verify ghcr.io/cactus-compute/needle2-component:2.0.4 \
+  --certificate-identity-regexp '^https://github.com/cactus-compute/needle/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The artifact type is `application/vnd.wasm.component.v1+wasm`, so `wkg oci pull` works as well. Signatures are Sigstore keyless from the `publish-component` workflow in this repository; the certificate identity above is the only trust anchor.

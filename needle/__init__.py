@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import decimal
 import json
 import os
 import re
@@ -161,13 +162,18 @@ class Needle:
             warnings.warn("finetuning does not update the confidence head, so scores are "
                           "uncalibrated for tuned weights; this agent reports confidence as None",
                           stacklevel=2)
-        self._system = (system or "").encode("utf-8")
+        self._system_text = system or ""
+        self._system = self._system_text.encode("utf-8")
         tools_json = tools if isinstance(tools, str) else json.dumps(self._resolve(tools))
         self._tools_json = tools_json.encode("utf-8")
         try:
-            self._n_tools = len(json.loads(tools_json))
+            parsed_tools = json.loads(tools_json)
+            self._n_tools = len(parsed_tools)
         except (json.JSONDecodeError, TypeError):
-            self._n_tools = None
+            parsed_tools, self._n_tools = [], None
+        self._tool_schemas = [entry for entry in (parsed_tools or [])
+                              if isinstance(entry, dict)]
+        self._seen_years = set()
         self._tool_index_path = tool_index_path.encode("utf-8") if tool_index_path else None
         self._buffer = ctypes.create_string_buffer(buffer_size)
         if self._weights:
@@ -192,6 +198,7 @@ class Needle:
             _active.pop(generation, None)
             raise RuntimeError("needle_init failed")
         _active[generation] = self
+        self._seen_years = set()
 
     def _resolve(self, tools):
         schemas = []
@@ -220,10 +227,11 @@ class Needle:
         return self._complete(text, max_new_tokens, payload)
 
     def _complete(self, text: str, max_new_tokens: int = 256,
-                  audio=None) -> dict:
+                  audio=None, ground: bool = True) -> dict:
         if audio is not None and self._generation < 3:
             raise ValueError("audio requires a Needle 3 model")
         self._bind()
+        self._seen_years |= _source_years(text or "")
         if self._worker is not None:
             raw = self._worker.complete(text, max_new_tokens, audio)
         else:
@@ -249,6 +257,9 @@ class Needle:
                 f"engine bug - please report it with the prompt and schema") from err
         if self._weights:
             response["confidence"] = None
+        if ground:
+            _annotate_ungrounded(response, self._tool_schemas, self._seen_years,
+                                 self._system_text)
         return response
 
     def embed(self, text: str = "", audio=None, audio_format="wav",
@@ -272,7 +283,7 @@ class Needle:
 
     def run(self, query: str = "", max_steps: int = 8,
             max_new_tokens: int = 256, audio=None, audio_format="wav",
-            sample_rate=0, channels=1) -> dict:
+            sample_rate=0, channels=1, strict: bool = True) -> dict:
         _track("run", self._track_props())
         payload = _prepare_audio(audio, audio_format, sample_rate, channels)
         response = self._complete(query, max_new_tokens, payload)
@@ -281,18 +292,30 @@ class Needle:
             calls = response.get("function_calls") or []
             if response.get("type") != "call" or not calls:
                 break
+            ungrounded = _ungrounded_paths(response)
             results = []
             for call in calls:
+                name = str(call.get("name"))
+                fabricated = sorted(ungrounded.get(name, ()))
+                if strict and fabricated:
+                    grounded = _grounded_number_paths(
+                        call.get("arguments") or {}, query, self._system_text)
+                    fabricated = [path for path in fabricated
+                                  if path not in grounded]
+                if strict and fabricated:
+                    results.append({"error": "ungrounded " + ", ".join(fabricated)})
+                    continue
                 fn = self._functions.get(call.get("name"))
                 if fn is None:
-                    results.append({"error": "unknown tool: " + str(call.get("name"))})
+                    results.append({"error": "unknown tool: " + name})
                     continue
                 try:
                     results.append(fn(**(call.get("arguments") or {})))
                 except Exception as exc:
                     results.append({"error": str(exc)})
             executed.extend(results)
-            response = self._complete(json.dumps(results, default=_jsonable), max_new_tokens)
+            response = self._complete(json.dumps(results, default=_jsonable),
+                                      max_new_tokens, ground=False)
         response["results"] = executed
         return response
 
@@ -307,6 +330,7 @@ class Needle:
             self._worker.reset()
         else:
             _lib(self._generation).needle_reset()
+        self._seen_years = set()
 
     def close(self):
         if self._worker is not None:
@@ -373,9 +397,15 @@ def _source_years(text):
             for match in re.finditer(pattern, lowered)}
 
 
-def _temporal_grounding(text, schema, arguments):
+def _licensed_years(seen_years, system=None):
+    years = set(seen_years)
+    if years and system:
+        years |= _source_years(system)
+    return years
+
+
+def _walk_grounding(schema, arguments, years):
     root = _schema_parameters(schema)
-    years = _source_years(text)
     checked, failures = set(), set()
 
     def walk(value, node, path):
@@ -405,11 +435,94 @@ def _temporal_grounding(text, schema, arguments):
     return checked, failures
 
 
-def _validate_extraction(text, schema, arguments, response):
-    checked, failures = _temporal_grounding(text, schema, arguments)
+def _temporal_grounding(text, schema, arguments, system=None):
+    years = _licensed_years(_source_years(text), system)
+    return _walk_grounding(schema, arguments, years)
+
+
+_NUMBER_TOKEN = re.compile(
+    r"(?<![\w.,])(?:[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[-+]?\d+(?:\.\d+)?)(?!\d)")
+
+
+def _numeric_paths(arguments, path=""):
+    """Yield ``(path, value)`` for every numeric leaf, arguments-relative.
+
+    Paths match the form both call sites derive after stripping the engine's
+    tool prefix, so a flagged ``Tool.path`` resolves to a helper path.
+    """
+    if isinstance(arguments, bool):
+        return
+    if isinstance(arguments, (int, float)):
+        yield path, arguments
+    elif isinstance(arguments, dict):
+        for key, item in arguments.items():
+            yield from _numeric_paths(item, f"{path}.{key}" if path else str(key))
+    elif isinstance(arguments, list):
+        for index, item in enumerate(arguments):
+            yield from _numeric_paths(item, f"{path}[{index}]")
+
+
+def _source_numbers(*sources):
+    """Numeric values written in the source texts, separators normalized."""
+    text = "\n".join(source for source in sources if source)
+    return {decimal.Decimal(match.group(0).replace(",", ""))
+            for match in _NUMBER_TOKEN.finditer(text)}
+
+
+def _grounded_number_paths(arguments, *sources):
+    numbers = _source_numbers(*sources)
+    if not numbers:
+        return set()
+    grounded = set()
+    for path, value in _numeric_paths(arguments):
+        try:
+            if decimal.Decimal(str(value)) in numbers:
+                grounded.add(path)
+        except (decimal.InvalidOperation, ValueError):
+            continue
+    return grounded
+
+
+def _ungrounded_paths(response):
     validation = response.get("validation") or {}
+    grouped = {}
     for name in validation.get("ungrounded") or []:
+        tool, _, path = str(name).partition(".")
+        grouped.setdefault(tool, set()).add(path or tool)
+    return grouped
+
+
+def _annotate_ungrounded(response, tool_schemas, seen_years, system=None):
+    calls = response.get("function_calls") or []
+    years = _licensed_years(seen_years, system)
+    if not calls or not years:
+        return
+    schemas = {entry.get("name"): entry for entry in tool_schemas}
+    found = []
+    for call in calls:
+        schema = schemas.get(call.get("name"))
+        if schema is None:
+            continue
+        _, failures = _walk_grounding(schema, call.get("arguments") or {}, years)
+        found.extend(f"{call['name']}.{path}" for path in sorted(failures))
+    if not found:
+        return
+    validation = response.setdefault("validation", {}) or {}
+    response["validation"] = validation
+    existing = list(validation.get("ungrounded") or [])
+    validation["ungrounded"] = existing + [
+        name for name in found if name not in existing]
+
+
+def _validate_extraction(text, schema, arguments, response, system=None):
+    checked, failures = _temporal_grounding(text, schema, arguments, system)
+    validation = response.get("validation") or {}
+    flagged = validation.get("ungrounded") or []
+    grounded = _grounded_number_paths(arguments, text, system) if flagged else set()
+    for name in flagged:
         path = name.split(".", 1)[-1]
+        if path in grounded:
+            continue
         if path not in checked or path in failures:
             failures.add(path)
     if validation.get("negation"):
@@ -443,5 +556,5 @@ def extract(text: str, schema: type | dict, system: str | None = None,
         return None
     arguments = calls[0].get("arguments") or {}
     if strict:
-        _validate_extraction(text, schema, arguments, response)
+        _validate_extraction(text, schema, arguments, response, system)
     return schema(**arguments) if _is_pydantic_model(schema) else arguments

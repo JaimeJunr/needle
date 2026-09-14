@@ -32,14 +32,28 @@ def repo(tmp_path):
     return tmp_path
 
 
-def version_output(repo):
+def version_output(repo, published="0.0.0"):
+    import os
     workflow = WORKFLOW.read_text()
     block = workflow.split("      - id: version\n        run: |\n", 1)[1]
     block = block.split("      - if:", 1)[0]
     output = repo / "output"
     output.write_text("")
-    run_block(repo, block, GITHUB_OUTPUT=str(output))
+    fake_bin = repo / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    curl = fake_bin / "curl"
+    curl.write_text("#!/bin/sh\nprintf '%s' '{\"info\": {\"version\": \"" + published + "\"}}'\n")
+    curl.chmod(0o755)
+    run_block(repo, block, GITHUB_OUTPUT=str(output),
+              PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     return output.read_text().strip()
+
+
+def tag_block(next_version):
+    workflow = WORKFLOW.read_text()
+    block = workflow.rsplit("        run: |\n", 1)[1]
+    block = block.split("          git push", 1)[0]
+    return block.replace("${{ steps.version.outputs.next }}", next_version)
 
 
 def test_existing_release_tag_skips_unchanged_source(repo):
@@ -51,12 +65,8 @@ def test_release_tag_contains_versioned_source_and_skips_unchanged_main(repo):
     original = git(repo, "rev-parse", "HEAD")
     (repo / "pyproject.toml").write_text('version = "2.0.12"\n')
     (repo / "needle/__init__.py").write_text('__version__ = "2.0.12"\n')
-    workflow = WORKFLOW.read_text()
-    block = workflow.rsplit("        run: |\n", 1)[1]
     # The test uses a local tag and never pushes to a remote.
-    block = block.split("          git push", 1)[0]
-    block = block.replace("${{ steps.version.outputs.next }}", "2.0.12")
-    run_block(repo, block)
+    run_block(repo, tag_block("2.0.12"))
     assert git(repo, "show", "v2.0.12:pyproject.toml") == 'version = "2.0.12"'
     assert git(repo, "show", "v2.0.12:needle/__init__.py") == '__version__ = "2.0.12"'
     assert git(repo, "rev-parse", "v2.0.12^") == original
@@ -68,3 +78,31 @@ def test_release_tag_contains_versioned_source_and_skips_unchanged_main(repo):
     git(repo, "add", "feature.py")
     git(repo, "commit", "-m", "Add feature")
     assert version_output(repo) == "next=2.0.13"
+
+
+def test_manual_bump_on_main_follows_the_published_version(repo):
+    git(repo, "tag", "v2.0.11")
+    (repo / "pyproject.toml").write_text('version = "2.0.12"\n')
+    (repo / "needle/__init__.py").write_text('__version__ = "2.0.12"\n')
+    git(repo, "commit", "-am", "Bump version on main")
+    bumped = git(repo, "rev-parse", "HEAD")
+
+    assert version_output(repo, published="2.0.12") == "next=2.0.13"
+
+    (repo / "pyproject.toml").write_text('version = "2.0.13"\n')
+    (repo / "needle/__init__.py").write_text('__version__ = "2.0.13"\n')
+    run_block(repo, tag_block("2.0.13"))
+    assert git(repo, "show", "v2.0.13:pyproject.toml") == 'version = "2.0.13"'
+    assert git(repo, "rev-parse", "v2.0.13^") == bumped
+    assert version_output(repo, published="2.0.13") == "skip=true"
+
+
+def test_tag_step_tolerates_already_versioned_files(repo):
+    (repo / "pyproject.toml").write_text('version = "2.0.13"\n')
+    (repo / "needle/__init__.py").write_text('__version__ = "2.0.13"\n')
+    git(repo, "commit", "-am", "Bump version on main")
+    head = git(repo, "rev-parse", "HEAD")
+
+    run_block(repo, tag_block("2.0.13"))
+    assert git(repo, "rev-parse", "v2.0.13^{commit}") == head
+    assert version_output(repo, published="2.0.13") == "skip=true"
