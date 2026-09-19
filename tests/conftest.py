@@ -4,7 +4,7 @@ import pickle
 import pytest
 
 
-def _engine_available(generation=2):
+def _engine_available(generation=3):
     """Whether ``needle._library_path`` would find an engine without downloading.
 
     Every location this looks in has to be one that function looks in, or the
@@ -49,9 +49,10 @@ def tiny_checkpoint(tmp_path_factory):
     from needle.model.architecture import SimpleAttentionNetwork, TransformerConfig
 
     config = TransformerConfig(
-        vocab_size=8192, d_model=64, num_heads=4, num_kv_heads=2, num_layers=2,
-        max_seq_len=128, engram_layers=(1,), engram_slots=64, mhc_lanes=2,
-        flash=False,
+        vocab_size=8192, out_vocab=8192, d_model=64, num_heads=4, num_kv_heads=2,
+        num_layers=4, qk_head_dim=16, v_head_dim=16, max_seq_len=128,
+        engram_layers=(1, 3), engram_slots=64, global_layers=(3,), sliding_window=32,
+        mhc_lanes=2, qkv_conv_taps=3, flash=False,
     )
     model = SimpleAttentionNetwork(config)
     params = model.init(jax.random.PRNGKey(0), jnp.ones((1, 8), jnp.int32))["params"]
@@ -62,3 +63,38 @@ def tiny_checkpoint(tmp_path_factory):
         pickle.dump({"format_version": 2, "params": params,
                      "config": dict(vars(config))}, handle)
     return str(path)
+
+
+@pytest.fixture(scope="session")
+def tiny_checkpoint_safetensors(tiny_checkpoint, tmp_path_factory):
+    from needle.model.checkpoints import read_checkpoint, write_checkpoint
+
+    path = tmp_path_factory.mktemp("ckpt") / "tiny.safetensors"
+    write_checkpoint(path, read_checkpoint(tiny_checkpoint))
+    return str(path)
+
+
+@pytest.fixture(scope="session")
+def tiny_base_archive(tiny_checkpoint, tmp_path_factory):
+    from needle.model.export import write_export
+    from needle.model.run import load_checkpoint
+    from needle.model.tokenizer import get_tokenizer
+
+    params, config = load_checkpoint(tiny_checkpoint)
+    path = tmp_path_factory.mktemp("base") / "needle3.cact"
+    write_export(params, config, str(path), bits=4, tokenizer=get_tokenizer(config.vocab_size))
+    return str(path)
+
+
+@pytest.fixture
+def published_base(tiny_base_archive, monkeypatch):
+    from needle.agent import fetch
+
+    calls = []
+
+    def fake_fetch(generation=2, dest_dir=None, force=False):
+        calls.append((generation, force))
+        return tiny_base_archive
+
+    monkeypatch.setattr(fetch, "fetch_weights", fake_fetch)
+    return calls
