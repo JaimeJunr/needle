@@ -50,10 +50,12 @@ ARM_NAMES = ("en/en", "pt/en", "pt/pt")
 def select_arms(spec):
     """Resolve `--arms` para a lista de bracos a rodar.
 
-    Existe porque o engine do Needle 3 deadlocka ao instanciar um SEGUNDO
-    agente com pesos tunados no mesmo processo (futex_do_wait, 0% de CPU,
-    indefinidamente). Rodar um braco por processo e a saida que o proprio
-    upstream documenta.
+    CORRECAO de um diagnostico anterior: o motivo NAO e deadlock. Medido no
+    Needle 3, uma chamada `complete()` leva 36-57s na CPU da note2, contra
+    ~0,5s no Needle 2 -- 80x mais lenta. Um braco de 32 casos gasta ~21min, e
+    o processo parado em futex_do_wait com 0% de CPU parecia travado quando
+    so estava esperando o engine. Rodar um braco por processo permite dar
+    timeout e paralelizar sem que uma corrida longa leve as outras junto.
     """
     if not spec:
         return list(ARM_NAMES)

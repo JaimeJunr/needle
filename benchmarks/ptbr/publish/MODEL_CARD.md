@@ -91,6 +91,12 @@ Without it, expect the 65.6% / 4-critical row.
 - **Trained on the Needle 2 checkpoint**, runs on the Needle 3 engine. It works,
   but the quantisation scheme changed between them (`CQ mixed` 2-bit to `CQ W4`),
   so this adapter was built for a target the current engine no longer uses.
+  Retraining on the Needle 3 checkpoint was attempted and **did not work** --
+  see below.
+- **Slow on CPU with the Needle 3 engine**: 36-57 seconds per call on a 4-thread
+  laptop, against roughly half a second on the Needle 2 engine. The adapter is
+  not the cause -- the base model is equally slow -- but plan evaluation runs
+  accordingly.
 - **No confidence gate.** Fine-tuning does not update the confidence head, so
   tuned weights report `confidence` as `None`. The base model's calibrated
   confidence (0.79 average in Portuguese on Needle 3) is lost. The grounding gate
@@ -100,6 +106,26 @@ Without it, expect the 65.6% / 4-critical row.
   phrase was trained on — and do not prove generalisation to a new domain.
 - **Brazilian Portuguese**, not European. The stress cases target pt-BR
   colloquial negation, numeric format and register.
+
+## The Needle 3 retrain did not work
+
+Worth stating so nobody repeats it. A LoRA was trained on the Needle 3
+checkpoint itself -- 10/10 epochs, validation loss 0.0390, `needle build`
+reporting `merged 5 weight groups` and writing a 63.47 MB `.cact`. Every signal
+said success.
+
+The resulting model behaves **identically to the untuned base**: it answers
+English correctly and returns an empty call list for Portuguese, exactly like
+the stock model. The adapter had no effect.
+
+The size is the clue: the engine's own base is 35.34 MB and the merged artifact
+came out at 63.47 MB. A working merge should land near the base. The likely
+cause is that rank-16 LoRA over "5 weight groups" does not map onto the Needle 3
+architecture the way it did on Needle 2, so the trained weights are not where
+the engine reads them.
+
+Unresolved. The adapter published here is the Needle 2 one, which is measured
+and works.
 
 ## How it was built
 

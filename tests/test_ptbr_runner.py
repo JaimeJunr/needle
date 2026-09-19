@@ -139,14 +139,14 @@ def test_grounding_gate_is_inert_without_anchors():
 # --- um processo por braço (deadlock do engine 3) ---------------------------
 
 def test_arms_can_be_selected_individually():
-    """O engine 3 trava ao instanciar um segundo agente com pesos tunados.
+    """Permite um braço por processo, com timeout próprio.
 
-    Medido: com o .cact treinado no checkpoint do Needle 3, o primeiro agente
-    responde e o segundo nunca retorna -- futex_do_wait, 0% de CPU, parado por
-    quase 3h. O runner criava os três braços no mesmo processo, o que passava
-    no Needle 2 e deadlocka no 3. O próprio CLAUDE.md do upstream avisa: o
-    engine não descarrega pesos depois de ligar um .cact tunado, e a saída é
-    usar processos separados. `--arms` existe para isso.
+    O motivo real não é deadlock -- foi o que eu concluí primeiro e estava
+    errado. Medido no Needle 3: `complete()` leva 36-57s por chamada contra
+    ~0,5s no Needle 2. Um braço de 32 casos gasta ~21min e o processo fica em
+    futex_do_wait com 0% de CPU, o que parece travamento e é só espera. Um
+    processo por braço permite dar timeout sem que uma corrida longa arraste
+    as outras.
     """
     assert runner.ARM_NAMES == ("en/en", "pt/en", "pt/pt")
     assert runner.select_arms(None) == list(runner.ARM_NAMES)
