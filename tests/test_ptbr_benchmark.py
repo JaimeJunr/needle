@@ -39,9 +39,26 @@ def test_translations_are_not_copies(mirror):
 
 
 def test_cases_preserve_gold_standard(mirror):
-    """O gabarito pt tem de ser byte-a-byte o gabarito en, caso a caso."""
+    """O gabarito pt é o gabarito en, salvo o texto livre declarado.
+
+    Texto livre é a única diferença permitida, e só para os valores que o
+    módulo declara em FREE_TEXT: o Needle copia texto livre verbatim da frase,
+    então traduzir a query sem traduzir o valor esperado exigiria do modelo que
+    copiasse inglês de dentro de uma frase portuguesa. Tudo o mais -- nome da
+    tool, conjunto de argumentos, enum, número -- continua idêntico.
+    """
+    free_text = getattr(mirror, "FREE_TEXT", {})
     for pt_case, en_case in zip(mirror.TEST_CASES, mirror.EN.TEST_CASES):
-        assert pt_case["calls"] == en_case["calls"]
+        assert len(pt_case["calls"]) == len(en_case["calls"])
+        for pt_call, en_call in zip(pt_case["calls"], en_case["calls"]):
+            assert pt_call["name"] == en_call["name"]
+            assert set(pt_call["arguments"]) == set(en_call["arguments"])
+            for key, en_value in en_call["arguments"].items():
+                pt_value = pt_call["arguments"][key]
+                expected = free_text.get(en_value, en_value) if isinstance(en_value, str) else en_value
+                assert pt_value == expected, (
+                    f"{key}: {pt_value!r} != {expected!r} -- valor mudou sem estar em FREE_TEXT"
+                )
         assert pt_case["category"] == en_case["category"]
         assert pt_case.get("critical", False) == en_case.get("critical", False)
         assert pt_case["query"] == mirror.QUERIES[en_case["query"]]
@@ -128,3 +145,64 @@ def test_stress_cases_match_declared_tools():
                     assert value >= prop["minimum"]
                 if "maximum" in prop:
                     assert value <= prop["maximum"]
+
+
+# --- texto livre: traduzir query e gabarito juntos --------------------------
+
+def test_free_text_translation_travels_with_the_query():
+    """Campo de texto livre tem de ser traduzido na query E no gabarito.
+
+    O contrato do Needle é copiar texto livre verbatim: se a frase diz
+    'regar as plantas', a resposta certa carrega 'regar as plantas'. Manter o
+    gabarito em inglês produziria a frase híbrida 'me lembra às 6pm de water
+    the plants', que não é português e não mede custo de idioma -- mediria se
+    o modelo copia inglês de dentro de uma frase portuguesa.
+    """
+    from benchmarks.ptbr import _mirror
+
+    class FakeEnvironment:
+        __name__ = "fake"
+        TEST_CASES = [{
+            "query": "remind me at 6pm to water the plants",
+            "calls": [{"name": "set_reminder",
+                       "arguments": {"message": "water the plants", "when": "6pm"}}],
+            "category": "positive",
+        }]
+
+    cases = _mirror.build_cases(
+        FakeEnvironment,
+        {"remind me at 6pm to water the plants": "me lembra às 6pm de regar as plantas"},
+        free_text={"water the plants": "regar as plantas"},
+    )
+    assert cases[0]["calls"][0]["arguments"]["message"] == "regar as plantas"
+    assert cases[0]["calls"][0]["arguments"]["when"] == "6pm", "campo fora do mapa não muda"
+
+
+def test_free_text_never_touches_the_source_module():
+    """Substituir in-place corromperia o environment inglês para todo o processo."""
+    from benchmarks.ptbr import _mirror
+
+    class FakeEnvironment:
+        __name__ = "fake"
+        TEST_CASES = [{
+            "query": "log grilled salmon",
+            "calls": [{"name": "log_meal", "arguments": {"food": "grilled salmon"}}],
+            "category": "positive",
+        }]
+
+    _mirror.build_cases(FakeEnvironment, {"log grilled salmon": "registra salmão grelhado"},
+                        free_text={"grilled salmon": "salmão grelhado"})
+    assert FakeEnvironment.TEST_CASES[0]["calls"][0]["arguments"]["food"] == "grilled salmon"
+
+
+def test_free_text_map_must_not_carry_unused_entries():
+    """Entrada órfã indica tradução que não casou -- provável typo silencioso."""
+    from benchmarks.ptbr import _mirror
+
+    class FakeEnvironment:
+        __name__ = "fake"
+        TEST_CASES = [{"query": "hello", "calls": [], "category": "irrelevant"}]
+
+    with pytest.raises(ValueError, match="não usada"):
+        _mirror.build_cases(FakeEnvironment, {"hello": "olá"},
+                            free_text={"nunca aparece": "jamais"})

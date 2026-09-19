@@ -21,7 +21,14 @@ vale a pena traduzir as descrições das tools.
 
 import importlib
 
-_MIRROR_NAMES = ("smart_home",)
+_MIRROR_NAMES = (
+    "data_capture",
+    "kitchen_appliance",
+    "media_player",
+    "productivity",
+    "smart_home",
+    "wearable",
+)
 
 __all__ = ["MIRRORS", "stress", "trainset", *_MIRROR_NAMES]
 
