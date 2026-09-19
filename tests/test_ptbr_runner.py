@@ -111,3 +111,26 @@ def test_run_arm_records_reset_error_and_continues(monkeypatch):
     assert result["records"][0]["ok"] is False
     assert "worker exited" in result["records"][0]["error"]
     assert result["records"][1]["ok"] is True
+
+
+# --- gate de grounding ------------------------------------------------------
+
+ANCHORS = {"room": {"kitchen": ("cozinha",), "bedroom": ("quarto",)}}
+
+
+def test_grounding_gate_drops_a_call_the_query_does_not_support():
+    got = [{"name": "control_lights", "arguments": {"room": "bedroom"}}]
+    kept, gated = runner.apply_grounding("liga a luz da cozinha", got, ANCHORS)
+    assert kept == [] and gated is True
+
+
+def test_grounding_gate_keeps_a_supported_call():
+    got = [{"name": "control_lights", "arguments": {"room": "kitchen"}}]
+    kept, gated = runner.apply_grounding("liga a luz da cozinha", got, ANCHORS)
+    assert kept == got and gated is False
+
+
+def test_grounding_gate_is_inert_without_anchors():
+    """Environment sem âncoras declaradas roda exatamente como antes."""
+    got = [{"name": "control_lights", "arguments": {"room": "bedroom"}}]
+    assert runner.apply_grounding("qualquer frase", got, None) == (got, False)

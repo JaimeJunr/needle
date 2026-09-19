@@ -145,3 +145,27 @@ SYSTEM_PT = (
     "declarada; nunca duplique uma ação. Não adivinhe alvos ou valores que faltam. Pedidos não "
     "suportados, inválidos, ambíguos ou negados não retornam chamada nenhuma."
 )
+
+
+# --- âncoras para o gate de grounding --------------------------------------
+#
+# Palavras pt-BR que sustentam cada valor de enum. Usadas por `--grounding`
+# para recusar chamada cujo cômodo a frase não menciona -- o erro exato que o
+# modelo base cometia, colapsando todo cômodo em `bedroom`.
+#
+# Só `room` está mapeado: é onde o erro se concentra, e âncora para verbo de
+# ação (`on`/`off`) daria falso negativo em perífrase ("dá uma acendida"), que
+# o modelo acerta e o gate não deve punir.
+# O termo em inglês entra junto porque o gate roda nos TRÊS braços, inclusive
+# `en/en`. Medido com âncoras só em português: en/en caiu de 75,0% para 53,1%
+# com 13 recusas -- o gate condenava toda chamada inglesa por não achar
+# "cozinha" em "turn on the kitchen lights". A âncora é sobre o referente, não
+# sobre o idioma em que a frase foi escrita.
+ANCHORS = {
+    "room": {
+        "kitchen": ("cozinha", "copa", "kitchen"),
+        "living_room": ("sala", "living", "estar", "lounge"),
+        "bedroom": ("quarto", "dormitorio", "dormitório", "suite", "suíte", "bedroom"),
+        "study": ("escritorio", "escritório", "estudo", "estudos", "study"),
+    },
+}
