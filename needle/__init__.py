@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import ctypes
 import decimal
+import datetime
 import json
 import os
 import re
-import sys
 import warnings
 
 from .agent.tools import Field, build_schema, pydantic_schema, tool, _is_pydantic_model
 from ._telemetry import track as _track
 from ._worker import FineTuneWorker
 
-__version__ = "2.0.12"
+__version__ = "3.0.1"
 __all__ = ["Needle", "ExtractionValidationError", "tool", "Field", "extract",
            "__version__"]
 
@@ -73,56 +73,30 @@ def _library_path(generation=2):
     return fetch.fetch_library(version, cache, generation=generation)
 
 
+def _base_weights_path(generation):
+    from .agent import fetch
+
+    local = os.path.join(fetch.cache_dir(generation), fetch.base_weights(generation))
+    if os.path.exists(local):
+        return local
+    return fetch.fetch_weights(generation)
+
+
 _lib_handles = {}
 _active = {}
+_loaded_base = {}
 
 
-class _NeedleAudio(ctypes.Structure):
-    _fields_ = [
-        ("data", ctypes.c_void_p),
-        ("size", ctypes.c_uint64),
-        ("sample_rate", ctypes.c_int),
-        ("channels", ctypes.c_int),
-        ("format", ctypes.c_int),
-    ]
-
-
-_AUDIO_FORMATS = {"wav": 1, "pcm16": 2, "float32": 3}
-
-
-def _prepare_audio(audio, audio_format="wav", sample_rate=0, channels=1):
-    if audio is None:
-        return None
-    if isinstance(audio, (str, os.PathLike)):
-        with open(os.fspath(audio), "rb") as handle:
-            data = handle.read()
-    else:
-        try:
-            data = bytes(audio)
-        except (TypeError, ValueError) as exc:
-            raise TypeError("audio must be a path or bytes-like object") from exc
-    if not data:
-        raise ValueError("audio is empty")
-    try:
-        format_code = _AUDIO_FORMATS[str(audio_format).lower()]
-    except KeyError as exc:
-        raise ValueError("audio_format must be 'wav', 'pcm16', or 'float32'") from exc
-    if format_code != _AUDIO_FORMATS["wav"] and (
-            int(sample_rate) <= 0 or int(channels) <= 0):
-        raise ValueError("PCM audio requires positive sample_rate and channels")
-    return {"data": data, "format": format_code,
-            "sample_rate": int(sample_rate), "channels": int(channels)}
-
-
-def _native_audio(payload):
-    if payload is None:
-        return None, None
-    data = payload["data"]
-    storage = ctypes.create_string_buffer(data, len(data))
-    descriptor = _NeedleAudio(
-        ctypes.cast(storage, ctypes.c_void_p), len(data),
-        payload["sample_rate"], payload["channels"], payload["format"])
-    return ctypes.byref(descriptor), (storage, descriptor)
+def _load_base(lib, generation):
+    if generation < 3 or _loaded_base.get(generation):
+        return
+    path = _base_weights_path(generation)
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if lib.needle_load(data, len(data)) < 0:
+        raise RuntimeError(f"needle_load failed for {path}")
+    _loaded_base[generation] = path
+    _active.pop(generation, None)
 
 
 def _lib(generation=2):
@@ -131,18 +105,13 @@ def _lib(generation=2):
         lib = ctypes.CDLL(_library_path(generation))
         lib.needle_init.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
         lib.needle_init.restype = ctypes.c_int
-        if generation >= 3:
-            lib.needle_complete.argtypes = [
-                ctypes.c_char_p, ctypes.POINTER(_NeedleAudio), ctypes.c_int,
-                ctypes.c_char_p, ctypes.c_int]
-            lib.needle_embed.argtypes = [
-                ctypes.c_char_p, ctypes.POINTER(_NeedleAudio),
-                ctypes.POINTER(ctypes.c_float), ctypes.c_int]
-            lib.needle_embed.restype = ctypes.c_int
-        else:
-            lib.needle_complete.argtypes = [
-                ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        lib.needle_complete.argtypes = [
+            ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
         lib.needle_complete.restype = ctypes.c_int
+        if generation >= 3:
+            lib.needle_embed.argtypes = [
+                ctypes.c_char_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int]
+            lib.needle_embed.restype = ctypes.c_int
         lib.needle_reset.argtypes = []
         lib.needle_reset.restype = None
         lib.needle_load.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
@@ -152,17 +121,22 @@ def _lib(generation=2):
 
 
 class Needle:
-    def __init__(self, tools=None, system=None, weights=None, tool_index_path=None, buffer_size=65536):
+    def __init__(self, tools=None, system=None, weights=None, tool_index_path=None, buffer_size=65536,
+                 auto_date=True, generation=None):
         self._functions = {}
         self._weights = os.fspath(weights) if weights is not None else None
-        self._generation = _weight_generation(self._weights) if self._weights else 2
+        self._tuned = self._weights is not None
+        if self._tuned:
+            self._generation = _weight_generation(self._weights)
+        else:
+            self._generation = int(generation or 3)
         self._worker = None
         self._closed = False
-        if weights:
+        if self._tuned:
             warnings.warn("finetuning does not update the confidence head, so scores are "
                           "uncalibrated for tuned weights; this agent reports confidence as None",
                           stacklevel=2)
-        self._system_text = system or ""
+        self._system_text = _with_date_fact(system or "") if auto_date else (system or "")
         self._system = self._system_text.encode("utf-8")
         tools_json = tools if isinstance(tools, str) else json.dumps(self._resolve(tools))
         self._tools_json = tools_json.encode("utf-8")
@@ -192,6 +166,7 @@ class Needle:
             return
         generation = self._generation
         lib = _lib(generation)
+        _load_base(lib, generation)
         if _active.get(generation) is self:
             return
         if lib.needle_init(self._system, self._tools_json, self._tool_index_path) < 0:
@@ -216,35 +191,24 @@ class Needle:
         return schemas
 
     def _track_props(self):
-        return {"n_tools": self._n_tools, "tuned": bool(self._weights),
+        return {"n_tools": self._n_tools, "tuned": self._tuned,
                 "generation": self._generation}
 
-    def complete(self, text: str = "", max_new_tokens: int = 256,
-                 audio=None, audio_format="wav", sample_rate=0,
-                 channels=1) -> dict:
+    def complete(self, text: str = "", max_new_tokens: int = 512) -> dict:
         _track("complete", self._track_props())
-        payload = _prepare_audio(audio, audio_format, sample_rate, channels)
-        return self._complete(text, max_new_tokens, payload)
+        return self._complete(text, max_new_tokens)
 
-    def _complete(self, text: str, max_new_tokens: int = 256,
-                  audio=None, ground: bool = True) -> dict:
-        if audio is not None and self._generation < 3:
-            raise ValueError("audio requires a Needle 3 model")
+    def _complete(self, text: str, max_new_tokens: int = 512,
+                  ground: bool = True) -> dict:
         self._bind()
         self._seen_years |= _source_years(text or "")
         if self._worker is not None:
-            raw = self._worker.complete(text, max_new_tokens, audio)
+            raw = self._worker.complete(text, max_new_tokens)
         else:
             lib = _lib(self._generation)
-            if self._generation >= 3:
-                native_audio, keepalive = _native_audio(audio)
-                rc = lib.needle_complete(
-                    text.encode("utf-8"), native_audio, int(max_new_tokens),
-                    self._buffer, len(self._buffer))
-            else:
-                rc = lib.needle_complete(
-                    text.encode("utf-8"), int(max_new_tokens), self._buffer,
-                    len(self._buffer))
+            rc = lib.needle_complete(
+                text.encode("utf-8"), int(max_new_tokens), self._buffer,
+                len(self._buffer))
             if rc < 0:
                 detail = self._buffer.value.decode("utf-8", "replace")
                 raise RuntimeError(detail or f"needle_complete failed (code {rc})")
@@ -255,38 +219,33 @@ class Needle:
             raise RuntimeError(
                 f"engine returned an unparseable envelope ({err}); this is an "
                 f"engine bug - please report it with the prompt and schema") from err
-        if self._weights:
+        if self._tuned:
             response["confidence"] = None
         if ground:
             _annotate_ungrounded(response, self._tool_schemas, self._seen_years,
-                                 self._system_text)
+                                 self._system_text, text)
         return response
 
-    def embed(self, text: str = "", audio=None, audio_format="wav",
-              sample_rate=0, channels=1) -> list[float]:
+    def embed(self, text: str = "") -> list[float]:
         if self._generation < 3:
             raise ValueError("embeddings require a Needle 3 model")
-        payload = _prepare_audio(audio, audio_format, sample_rate, channels)
         self._bind()
         if self._worker is not None:
-            return self._worker.embed(text, payload)
+            return self._worker.embed(text)
         lib = _lib(self._generation)
-        native_audio, keepalive = _native_audio(payload)
-        dim = lib.needle_embed(text.encode("utf-8"), native_audio, None, 0)
+        dim = lib.needle_embed(text.encode("utf-8"), None, 0)
         if dim <= 0:
             raise RuntimeError(f"needle_embed failed (code {dim})")
         output = (ctypes.c_float * dim)()
-        rc = lib.needle_embed(text.encode("utf-8"), native_audio, output, dim)
+        rc = lib.needle_embed(text.encode("utf-8"), output, dim)
         if rc != dim:
             raise RuntimeError(f"needle_embed failed (code {rc})")
         return list(output)
 
     def run(self, query: str = "", max_steps: int = 8,
-            max_new_tokens: int = 256, audio=None, audio_format="wav",
-            sample_rate=0, channels=1, strict: bool = True) -> dict:
+            max_new_tokens: int = 512, strict: bool = True) -> dict:
         _track("run", self._track_props())
-        payload = _prepare_audio(audio, audio_format, sample_rate, channels)
-        response = self._complete(query, max_new_tokens, payload)
+        response = self._complete(query, max_new_tokens)
         executed = []
         for _ in range(max_steps):
             calls = response.get("function_calls") or []
@@ -319,7 +278,7 @@ class Needle:
         response["results"] = executed
         return response
 
-    def extract(self, text: str, schema: type | dict, max_new_tokens: int = 256,
+    def extract(self, text: str, schema: type | dict, max_new_tokens: int = 512,
                 strict: bool = True) -> object:
         return extract(text, schema, max_new_tokens=max_new_tokens,
                        weights=self._weights, strict=strict)
@@ -397,9 +356,36 @@ def _source_years(text):
             for match in re.finditer(pattern, lowered)}
 
 
-def _licensed_years(seen_years, system=None):
+_ISO_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _with_date_fact(system: str) -> str:
+    """Prefix the local date fact unless the caller already supplied one."""
+    if "date:" in system or _ISO_STAMP.search(system):
+        return system
+    now = datetime.datetime.now()
+    fact = now.strftime("date: %Y-%m-%d %a %H:%M")
+    if not system.strip():
+        return fact
+    if system.lstrip().startswith("{"):
+        return system
+    return fact + "; " + system
+
+
+_RELATIVE_CUE = re.compile(
+    r"\b(today|tonight|tomorrow|yesterday|next|this|coming|now|in \d+ (?:days?|weeks?|months?|years?)|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.IGNORECASE)
+
+
+def _relative_cue(text) -> bool:
+    return bool(text) and _RELATIVE_CUE.search(text) is not None
+
+
+def _licensed_years(seen_years, system=None, relative=True):
+    """Years a date argument may carry: the ones written in the input, plus the
+    system date's year when the input reasons relatively (tomorrow, next week)."""
     years = set(seen_years)
-    if years and system:
+    if years and system and relative:
         years |= _source_years(system)
     return years
 
@@ -436,7 +422,7 @@ def _walk_grounding(schema, arguments, years):
 
 
 def _temporal_grounding(text, schema, arguments, system=None):
-    years = _licensed_years(_source_years(text), system)
+    years = _licensed_years(_source_years(text), system, _relative_cue(text))
     return _walk_grounding(schema, arguments, years)
 
 
@@ -462,7 +448,15 @@ def _numeric_paths(arguments, path=""):
             yield from _numeric_paths(item, f"{path}[{index}]")
 
 
+_DATE_FACT = re.compile(r"date:\s*\d{4}-\d{2}-\d{2}(?:\s+[A-Za-z]{3})?(?:\s+\d{2}:\d{2})?|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?")
+
+
+def _without_date_facts(text):
+    return _DATE_FACT.sub(" ", text or "")
+
+
 def _source_numbers(*sources):
+    sources = tuple(_without_date_facts(source) for source in sources)
     """Numeric values written in the source texts, separators normalized."""
     text = "\n".join(source for source in sources if source)
     return {decimal.Decimal(match.group(0).replace(",", ""))
@@ -492,9 +486,9 @@ def _ungrounded_paths(response):
     return grouped
 
 
-def _annotate_ungrounded(response, tool_schemas, seen_years, system=None):
+def _annotate_ungrounded(response, tool_schemas, seen_years, system=None, text=None):
     calls = response.get("function_calls") or []
-    years = _licensed_years(seen_years, system)
+    years = _licensed_years(seen_years, system, _relative_cue(text) if text is not None else True)
     if not calls or not years:
         return
     schemas = {entry.get("name"): entry for entry in tool_schemas}
@@ -534,8 +528,8 @@ def _validate_extraction(text, schema, arguments, response, system=None):
 
 
 def extract(text: str, schema: type | dict, system: str | None = None,
-            max_new_tokens: int = 256, weights: str | None = None,
-            strict: bool = True) -> object:
+            max_new_tokens: int = 512, weights: str | None = None,
+            strict: bool = True, generation: int | None = None) -> object:
     """One-shot structured extraction using the matching native engine.
 
     With ``strict=True`` (the default), temporal values that contradict a literal
@@ -543,15 +537,15 @@ def extract(text: str, schema: type | dict, system: str | None = None,
     :class:`ExtractionValidationError` instead of being returned silently.
     """
     selected = weights
-    generation = _weight_generation(selected) if selected else 2
+    generation = _weight_generation(selected) if selected else int(generation or 3)
     _track("extract", {"n_tools": 1, "tuned": bool(selected),
                        "generation": generation})
-    agent = Needle(tools=[schema], system=system, weights=selected)
+    agent = Needle(tools=[schema], system=system, weights=selected, generation=generation)
     try:
         response = agent._complete(text, max_new_tokens)
     finally:
         agent.close()
-    calls = response.get("function_calls") or []
+    calls = response.get("function_calls") or response.get("suppressed_calls") or []
     if not calls:
         return None
     arguments = calls[0].get("arguments") or {}
