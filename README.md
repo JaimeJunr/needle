@@ -4,6 +4,14 @@ A foundation model for mobiles, wearables, robots, smart home, automotive and mi
 
 *[Leia em português](README.pt-BR.md)*
 
+> **This is a fork that makes Needle work in Brazilian Portuguese.**
+> Needle 3 does not hallucinate in Portuguese — it declines: on the cases where
+> a call is the right answer, it acts on 2 out of 18. This fork takes that to
+> **14 out of 18** with a LoRA adapter and a grounding gate, and improves English
+> at the same time (78.1% → 87.5%, three critical failures down to zero).
+> Numbers, method and limits: **[benchmarks/ptbr/README.md](benchmarks/ptbr/README.md)**.
+> Everything lives under `benchmarks/`; `needle/` is untouched upstream code.
+
 - **Tool calls**: given the functions your app exposes, Needle picks the right ones and fills every argument from what the user said. Ask for two things and you get two calls in order; ask for something no tool covers and you get an empty list, not a guess.
 - **Structured extraction**: declare a shape, hand over messy text, get typed fields back: an invoice, a booking, a notification, a form. The decode grammar guarantees the output parses, and extraction generalises to classification.
 - **Text embedding**: the same model returns a vector for a sentence, so an app can search, match and route locally.
