@@ -44,6 +44,26 @@ def apply_gate(got, confidence, min_confidence):
     return got, False
 
 
+ARM_NAMES = ("en/en", "pt/en", "pt/pt")
+
+
+def select_arms(spec):
+    """Resolve `--arms` para a lista de bracos a rodar.
+
+    Existe porque o engine do Needle 3 deadlocka ao instanciar um SEGUNDO
+    agente com pesos tunados no mesmo processo (futex_do_wait, 0% de CPU,
+    indefinidamente). Rodar um braco por processo e a saida que o proprio
+    upstream documenta.
+    """
+    if not spec:
+        return list(ARM_NAMES)
+    chosen = [a.strip() for a in spec.split(",") if a.strip()]
+    unknown = [a for a in chosen if a not in ARM_NAMES]
+    if unknown:
+        raise ValueError(f"braco desconhecido: {unknown!r}; validos: {list(ARM_NAMES)}")
+    return chosen
+
+
 def apply_grounding(query, got, anchors):
     """Descarta o turno inteiro quando algum argumento nao tem apoio na frase.
 
@@ -194,6 +214,10 @@ def main(argv=None):
                         help="Roda também a camada de estresse (pontuada separadamente).")
     parser.add_argument("--json", type=str, default=None, help="Salva o resultado bruto.")
     parser.add_argument("--verbose", action="store_true", help="Imprime cada falha.")
+    parser.add_argument("--arms", type=str, default=None,
+                        help="Bracos a rodar, separados por virgula (en/en,pt/en,pt/pt). "
+                             "Com pesos tunados no Needle 3 rode UM por processo: o engine "
+                             "deadlocka no segundo agente tunado.")
     parser.add_argument("--grounding", action="store_true",
                         help="Recusa chamada cujo argumento a frase nao sustenta "
                              "(substitui o gate de confianca, que nao existe em pesos tunados).")
@@ -211,6 +235,8 @@ def main(argv=None):
             ("pt/en", EN.TOOLS, EN.SYSTEM, mirror.TEST_CASES),
             ("pt/pt", mirror.TOOLS_PT, mirror.SYSTEM_PT, mirror.TEST_CASES),
         ]
+        wanted = select_arms(args.arms)
+        arms = [a for a in arms if a[0] in wanted]
         results = []
         for arm_name, tools, system, cases in arms:
             if args.verbose:

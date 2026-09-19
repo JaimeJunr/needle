@@ -134,3 +134,27 @@ def test_grounding_gate_is_inert_without_anchors():
     """Environment sem âncoras declaradas roda exatamente como antes."""
     got = [{"name": "control_lights", "arguments": {"room": "bedroom"}}]
     assert runner.apply_grounding("qualquer frase", got, None) == (got, False)
+
+
+# --- um processo por braço (deadlock do engine 3) ---------------------------
+
+def test_arms_can_be_selected_individually():
+    """O engine 3 trava ao instanciar um segundo agente com pesos tunados.
+
+    Medido: com o .cact treinado no checkpoint do Needle 3, o primeiro agente
+    responde e o segundo nunca retorna -- futex_do_wait, 0% de CPU, parado por
+    quase 3h. O runner criava os três braços no mesmo processo, o que passava
+    no Needle 2 e deadlocka no 3. O próprio CLAUDE.md do upstream avisa: o
+    engine não descarrega pesos depois de ligar um .cact tunado, e a saída é
+    usar processos separados. `--arms` existe para isso.
+    """
+    assert runner.ARM_NAMES == ("en/en", "pt/en", "pt/pt")
+    assert runner.select_arms(None) == list(runner.ARM_NAMES)
+    assert runner.select_arms("pt/en") == ["pt/en"]
+    assert runner.select_arms("en/en,pt/pt") == ["en/en", "pt/pt"]
+
+
+def test_unknown_arm_is_rejected_loudly():
+    """Braço com typo rodaria zero casos e reportaria sucesso vazio."""
+    with pytest.raises(ValueError, match="desconhecido"):
+        runner.select_arms("pt/br")
