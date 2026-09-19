@@ -55,8 +55,16 @@ def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weigh
     records = []
     started = time.time()
     for case in cases:
-        agent.reset()
-        response = agent.complete(case["query"])
+        error = None
+        try:
+            if agent is None:
+                agent = _agent(tools, system, weights)
+            agent.reset()
+            response = agent.complete(case["query"])
+        except Exception as exc:
+            response = {}
+            error = f"{type(exc).__name__}: {exc}"
+            agent = None
         got = response.get("function_calls") or []
         confidence = response.get("confidence")
         got, gated = apply_gate(got, confidence, min_confidence)
@@ -70,12 +78,15 @@ def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weigh
             "got": got,
             "confidence": None if confidence is None else round(float(confidence), 4),
             "gated": gated,
-            "ok": _calls_match(got, case["calls"]),
+            "error": error,
+            "ok": error is None and _calls_match(got, case["calls"]),
         })
         if verbose and not records[-1]["ok"]:
             print(f"  FAIL [{case['category']}] {case['query']}")
             print(f"    want {json.dumps(case['calls'], ensure_ascii=False)}")
             print(f"    got  {json.dumps(got, ensure_ascii=False)}")
+            if error:
+                print(f"    error {error}")
     return {
         "arm": name,
         "seconds": round(time.time() - started, 1),

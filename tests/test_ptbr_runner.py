@@ -5,6 +5,31 @@ import pytest
 from benchmarks.ptbr import runner
 
 
+class FakeNeedleAgent:
+    def __init__(self):
+        self.queries = []
+
+    def reset(self):
+        pass
+
+    def complete(self, query):
+        self.queries.append(query)
+        if query == "quebra utf-8":
+            raise RuntimeError("UnicodeDecodeError: invalid continuation byte")
+        return {"function_calls": [], "confidence": None}
+
+
+class FakeResetFailsOnceAgent(FakeNeedleAgent):
+    def __init__(self):
+        super().__init__()
+        self.reset_calls = 0
+
+    def reset(self):
+        self.reset_calls += 1
+        if self.reset_calls == 1:
+            raise RuntimeError("Needle worker exited unexpectedly")
+
+
 def test_gate_drops_low_confidence_calls():
     got = [{"name": "control_lights", "arguments": {}}]
     kept, gated = runner.apply_gate(got, 0.1, 0.4)
@@ -54,3 +79,35 @@ def test_summary_reports_confidence_when_available():
     summary = runner.summarise(result)
     assert summary["mean_confidence"] == 0.5
     assert summary["gate_applicable"] is True
+
+
+def test_run_arm_records_inference_error_and_continues(monkeypatch):
+    fake_agent = FakeNeedleAgent()
+    monkeypatch.setattr(runner, "_agent", lambda *args, **kwargs: fake_agent)
+    cases = [
+        {"query": "quebra utf-8", "calls": [], "category": "irrelevant"},
+        {"query": "continua", "calls": [], "category": "irrelevant"},
+    ]
+
+    result = runner.run_arm("pt/en", [], "", cases)
+
+    assert fake_agent.queries == ["quebra utf-8", "continua"]
+    assert result["records"][0]["ok"] is False
+    assert "UnicodeDecodeError" in result["records"][0]["error"]
+    assert result["records"][1]["ok"] is True
+    assert result["records"][1]["error"] is None
+
+
+def test_run_arm_records_reset_error_and_continues(monkeypatch):
+    fake_agent = FakeResetFailsOnceAgent()
+    monkeypatch.setattr(runner, "_agent", lambda *args, **kwargs: fake_agent)
+    cases = [
+        {"query": "primeiro", "calls": [], "category": "irrelevant"},
+        {"query": "segundo", "calls": [], "category": "irrelevant"},
+    ]
+
+    result = runner.run_arm("pt/en", [], "", cases)
+
+    assert result["records"][0]["ok"] is False
+    assert "worker exited" in result["records"][0]["error"]
+    assert result["records"][1]["ok"] is True
