@@ -19,6 +19,8 @@ from collections import defaultdict
 
 import needle
 
+from benchmarks.ptbr import grounding as _grounding
+
 
 def _calls_match(got, want):
     if got == want:
@@ -42,6 +44,19 @@ def apply_gate(got, confidence, min_confidence):
     return got, False
 
 
+def apply_grounding(query, got, anchors):
+    """Descarta o turno inteiro quando algum argumento nao tem apoio na frase.
+
+    Ativado por `--grounding`. Sem `anchors` o gate e inerte, entao um
+    environment que ainda nao declarou o mapa roda exatamente como antes.
+    """
+    if not got or not anchors:
+        return got, False
+    if _grounding.is_grounded(query, got, anchors):
+        return got, False
+    return [], True
+
+
 def _agent(tools, system, weights=None):
     os.environ.setdefault("NEEDLE_STRICT_VALIDATE", "1")
     if weights:
@@ -49,7 +64,8 @@ def _agent(tools, system, weights=None):
     return needle.Needle(tools=tools, system=system)
 
 
-def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weights=None):
+def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weights=None,
+            anchors=None):
     """Roda um conjunto de casos contra uma configuração de tools e devolve o resultado bruto."""
     agent = _agent(tools, system, weights)
     records = []
@@ -68,6 +84,7 @@ def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weigh
         got = response.get("function_calls") or []
         confidence = response.get("confidence")
         got, gated = apply_gate(got, confidence, min_confidence)
+        got, ungrounded = apply_grounding(case["query"], got, anchors)
         records.append({
             "query": case["query"],
             "query_en": case.get("query_en"),
@@ -78,6 +95,7 @@ def run_arm(name, tools, system, cases, min_confidence=0.0, verbose=False, weigh
             "got": got,
             "confidence": None if confidence is None else round(float(confidence), 4),
             "gated": gated,
+            "ungrounded": ungrounded,
             "error": error,
             "ok": error is None and _calls_match(got, case["calls"]),
         })
@@ -176,6 +194,9 @@ def main(argv=None):
                         help="Roda também a camada de estresse (pontuada separadamente).")
     parser.add_argument("--json", type=str, default=None, help="Salva o resultado bruto.")
     parser.add_argument("--verbose", action="store_true", help="Imprime cada falha.")
+    parser.add_argument("--grounding", action="store_true",
+                        help="Recusa chamada cujo argumento a frase nao sustenta "
+                             "(substitui o gate de confianca, que nao existe em pesos tunados).")
     parser.add_argument("--weights", type=str, default=None,
                         help="Um .cact tunado a avaliar no lugar do modelo base.")
     args = parser.parse_args(argv)
@@ -194,8 +215,10 @@ def main(argv=None):
         for arm_name, tools, system, cases in arms:
             if args.verbose:
                 print(f"\n[{env_name}] braço {arm_name}")
+            anchors = getattr(mirror, "ANCHORS", None) if args.grounding else None
             results.append(run_arm(arm_name, tools, system, cases,
-                                   args.min_confidence, args.verbose, args.weights))
+                                   args.min_confidence, args.verbose, args.weights,
+                                   anchors))
         summaries = [summarise(r) for r in results]
         payload["mirror"].append({"environment": env_name, "results": results})
         _print_summary(f"espelho · {env_name} (gate de confiança {args.min_confidence})", summaries)
@@ -208,8 +231,9 @@ def main(argv=None):
             ("pt/en", EN.TOOLS, EN.SYSTEM),
             ("pt/pt", smart_home.TOOLS_PT, smart_home.SYSTEM_PT),
         ]
+        stress_anchors = getattr(smart_home, "ANCHORS", None) if args.grounding else None
         results = [run_arm(n, t, s, ptbr.stress.TEST_CASES, args.min_confidence,
-                           args.verbose, args.weights)
+                           args.verbose, args.weights, stress_anchors)
                    for n, t, s in stress_arms]
         payload["stress"] = results
         _print_summary(f"estresse pt-BR (gate de confiança {args.min_confidence})",
