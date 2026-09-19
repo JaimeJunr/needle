@@ -310,8 +310,35 @@ def _parallel_cases():
     return out
 
 
-def build():
-    """Monta o conjunto, removendo qualquer frase que colida com a avaliação."""
+def _thin_negatives(examples, negative_ratio):
+    """Subamostra negativos até a proporção pedida, preservando variedade.
+
+    Existe para o braço de controle do experimento: comparar 28% contra 15,6%
+    de negativos exige que TUDO o mais seja idêntico. Gerar a variante por um
+    segundo arquivo mediria drift entre arquivos, não o efeito da proporção.
+
+    A amostragem é por passo constante sobre a lista, não aleatória: além de
+    determinística, ela varre os blocos na ordem em que foram gerados
+    (negação, alvo ausente, valor vago, fora de escopo), então nenhum tipo de
+    recusa some inteiro -- o que aconteceria ao cortar os N primeiros.
+    """
+    positives = [ex for ex in examples if ex["answers"]]
+    negatives = [ex for ex in examples if not ex["answers"]]
+    if not negatives or negative_ratio >= len(negatives) / len(examples):
+        return examples
+    target = round(negative_ratio * len(positives) / (1 - negative_ratio))
+    target = max(1, min(target, len(negatives)))
+    stride = len(negatives) / target
+    keep = {id(negatives[min(int(i * stride), len(negatives) - 1)]) for i in range(target)}
+    return [ex for ex in examples if ex["answers"] or id(ex) in keep]
+
+
+def build(negative_ratio=None):
+    """Monta o conjunto, removendo qualquer frase que colida com a avaliação.
+
+    `negative_ratio` produz a variante de controle (ex.: 0.156 reproduz a
+    proporção do primeiro experimento); None entrega o conjunto cheio.
+    """
     raw = (_light_cases() + _fan_cases() + _blind_cases() + _thermostat_cases()
            + _vacuum_cases() + _negative_cases() + _parallel_cases())
     held_out = _held_out()
@@ -323,6 +350,8 @@ def build():
             continue
         seen.add(key)
         examples.append(ex)
+    if negative_ratio is not None:
+        examples = _thin_negatives(examples, negative_ratio)
     return examples
 
 
